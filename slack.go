@@ -21,15 +21,13 @@ func (sc *SlackClient) FetchMessages(channelID string, oldest, latest time.Time)
 	cursor := ""
 
 	for {
-		params := &slack.GetConversationHistoryParameters{
+		resp, err := sc.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
 			ChannelID: channelID,
 			Oldest:    strconv.FormatInt(oldest.Unix(), 10),
 			Latest:    strconv.FormatInt(latest.Unix(), 10),
 			Limit:     200,
 			Cursor:    cursor,
-		}
-
-		resp, err := sc.api.GetConversationHistory(params)
+		})
 		if err != nil {
 			if rle, ok := err.(*slack.RateLimitedError); ok {
 				time.Sleep(rle.RetryAfter)
@@ -39,7 +37,6 @@ func (sc *SlackClient) FetchMessages(channelID string, oldest, latest time.Time)
 		}
 
 		all = append(all, resp.Messages...)
-
 		if !resp.HasMore {
 			break
 		}
@@ -54,13 +51,11 @@ func (sc *SlackClient) FetchMembers(channelID string) ([]string, error) {
 	cursor := ""
 
 	for {
-		params := &slack.GetUsersInConversationParameters{
+		members, nextCursor, err := sc.api.GetUsersInConversation(&slack.GetUsersInConversationParameters{
 			ChannelID: channelID,
 			Cursor:    cursor,
 			Limit:     200,
-		}
-
-		members, nextCursor, err := sc.api.GetUsersInConversation(params)
+		})
 		if err != nil {
 			if rle, ok := err.(*slack.RateLimitedError); ok {
 				time.Sleep(rle.RetryAfter)
@@ -70,7 +65,35 @@ func (sc *SlackClient) FetchMembers(channelID string) ([]string, error) {
 		}
 
 		all = append(all, members...)
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
 
+	return all, nil
+}
+
+func (sc *SlackClient) FetchAllChannels() ([]slack.Channel, error) {
+	var all []slack.Channel
+	cursor := ""
+
+	for {
+		channels, nextCursor, err := sc.api.GetConversations(&slack.GetConversationsParameters{
+			Types:           []string{"public_channel", "private_channel"},
+			ExcludeArchived: true,
+			Limit:           200,
+			Cursor:          cursor,
+		})
+		if err != nil {
+			if rle, ok := err.(*slack.RateLimitedError); ok {
+				time.Sleep(rle.RetryAfter)
+				continue
+			}
+			return nil, fmt.Errorf("fetching channels: %w", err)
+		}
+
+		all = append(all, channels...)
 		if nextCursor == "" {
 			break
 		}
@@ -85,43 +108,10 @@ func (sc *SlackClient) GetUserDisplayName(userID string) (string, error) {
 	if err != nil {
 		return userID, fmt.Errorf("fetching user info: %w", err)
 	}
-
 	if user.Profile.DisplayName != "" {
 		return user.Profile.DisplayName, nil
 	}
 	return user.RealName, nil
-}
-
-func (sc *SlackClient) FetchBotChannels() ([]slack.Channel, error) {
-	var all []slack.Channel
-	cursor := ""
-
-	for {
-		params := &slack.GetConversationsParameters{
-			Types:           []string{"public_channel", "private_channel"},
-			ExcludeArchived: true,
-			Limit:           200,
-			Cursor:          cursor,
-		}
-
-		channels, nextCursor, err := sc.api.GetConversations(params)
-		if err != nil {
-			if rle, ok := err.(*slack.RateLimitedError); ok {
-				time.Sleep(rle.RetryAfter)
-				continue
-			}
-			return nil, fmt.Errorf("fetching channels: %w", err)
-		}
-
-		all = append(all, channels...)
-
-		if nextCursor == "" {
-			break
-		}
-		cursor = nextCursor
-	}
-
-	return all, nil
 }
 
 func (sc *SlackClient) SendDM(userID, text string) error {

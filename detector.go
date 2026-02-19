@@ -25,77 +25,115 @@ type Report struct {
 	Channels     []string
 }
 
+type scanTarget struct {
+	id   string
+	name string
+}
+
 func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, error) {
-	now := time.Now()
-	var oldest time.Time
+	from, to := timeRange(mode)
 
-	timeMode := mode
-	if mode == "deep-scan" {
-		timeMode = "weekly"
-	}
-	switch timeMode {
-	case "weekly":
-		oldest = now.AddDate(0, 0, -7)
-	default:
-		oldest = now.AddDate(0, 0, -1)
-	}
-	oldest = time.Date(oldest.Year(), oldest.Month(), oldest.Day(), 0, 0, 0, 0, oldest.Location())
-
-	// Collect members from the first configured channel (primary)
-	members, err := client.FetchMembers(cfg.Channels[0].ID)
+	tracked, err := resolveMembers(client, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	type member struct {
-		id   string
-		name string
+	scanClient, targets, err := scanTargets(client, cfg, mode)
+	if err != nil {
+		return nil, err
 	}
+
+	hasActivity, scanned := scanForPRs(scanClient, targets, from, to)
+
+	royalZombies, otherZombies := classifyZombies(tracked, hasActivity, cfg)
+
+	channels := scanned
+	if mode != "deep-scan" {
+		channels = targetNames(targets)
+	}
+
+	totalZombies := len(royalZombies) + len(otherZombies)
+	return &Report{
+		Mode:         mode,
+		From:         from,
+		To:           to,
+		RoyalZombies: royalZombies,
+		OtherZombies: otherZombies,
+		ActiveCount:  len(tracked) - totalZombies,
+		TotalCount:   len(tracked),
+		Channels:     channels,
+	}, nil
+}
+
+func timeRange(mode string) (from, to time.Time) {
+	to = time.Now()
+	days := -1
+	if mode == "weekly" || mode == "deep-scan" {
+		days = -7
+	}
+	from = to.AddDate(0, 0, days)
+	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, from.Location())
+	return
+}
+
+type member struct {
+	id   string
+	name string
+}
+
+func resolveMembers(client *SlackClient, cfg *Config) ([]member, error) {
+	ids, err := client.FetchMembers(cfg.Channels[0].ID)
+	if err != nil {
+		return nil, err
+	}
+
 	var tracked []member
-	for _, uid := range members {
+	for _, uid := range ids {
 		name, _ := client.GetUserDisplayName(uid)
 		if cfg.IsWhitelisted(uid, name) {
 			continue
 		}
 		tracked = append(tracked, member{id: uid, name: name})
 	}
+	return tracked, nil
+}
 
-	// Determine which channels to scan
-	type scanChannel struct {
-		id   string
-		name string
-	}
-	var toScan []scanChannel
-
-	scanClient := client
-	if mode == "deep-scan" {
-		if cfg.UserToken == "" {
-			return nil, fmt.Errorf("user_token is required for deep-scan mode")
+func scanTargets(client *SlackClient, cfg *Config, mode string) (*SlackClient, []scanTarget, error) {
+	if mode != "deep-scan" {
+		targets := make([]scanTarget, len(cfg.Channels))
+		for i, ch := range cfg.Channels {
+			targets[i] = scanTarget{id: ch.ID, name: ch.Name}
 		}
-		scanClient = NewSlackClient(cfg.UserToken)
-		userChannels, err := scanClient.FetchBotChannels()
-		if err != nil {
-			return nil, err
-		}
-		for _, ch := range userChannels {
-			toScan = append(toScan, scanChannel{id: ch.ID, name: ch.Name})
-		}
-	} else {
-		for _, ch := range cfg.Channels {
-			toScan = append(toScan, scanChannel{id: ch.ID, name: ch.Name})
-		}
+		return client, targets, nil
 	}
 
-	// Scan channels for GitHub PR activity
+	if cfg.UserToken == "" {
+		return nil, nil, fmt.Errorf("user_token is required for deep-scan mode")
+	}
+
+	userClient := NewSlackClient(cfg.UserToken)
+	channels, err := userClient.FetchAllChannels()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	targets := make([]scanTarget, len(channels))
+	for i, ch := range channels {
+		targets[i] = scanTarget{id: ch.ID, name: ch.Name}
+	}
+	return userClient, targets, nil
+}
+
+func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (map[string]bool, []string) {
 	hasActivity := make(map[string]bool)
-	var scannedNames []string
-	for _, ch := range toScan {
-		messages, err := scanClient.FetchMessages(ch.id, oldest, now)
+	var scanned []string
+
+	for _, ch := range targets {
+		messages, err := client.FetchMessages(ch.id, from, to)
 		if err != nil {
-			// Skip channels where access is denied
 			continue
 		}
-		scannedNames = append(scannedNames, ch.name)
+		scanned = append(scanned, ch.name)
 		for _, msg := range messages {
 			if githubPR.MatchString(msg.Text) {
 				hasActivity[msg.User] = true
@@ -103,38 +141,30 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		}
 	}
 
-	var royalZombies, otherZombies []MemberReport
+	return hasActivity, scanned
+}
+
+func classifyZombies(tracked []member, hasActivity map[string]bool, cfg *Config) (royal, other []MemberReport) {
 	for _, m := range tracked {
 		if hasActivity[m.id] {
 			continue
 		}
 		mr := MemberReport{UserID: m.id, DisplayName: m.name}
 		if cfg.IsRoyal(m.id, m.name) {
-			royalZombies = append(royalZombies, mr)
+			royal = append(royal, mr)
 		} else {
-			otherZombies = append(otherZombies, mr)
+			other = append(other, mr)
 		}
 	}
+	return
+}
 
-	channelNames := scannedNames
-	if mode != "deep-scan" {
-		channelNames = nil
-		for _, ch := range toScan {
-			channelNames = append(channelNames, ch.name)
-		}
+func targetNames(targets []scanTarget) []string {
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.name
 	}
-
-	totalZombies := len(royalZombies) + len(otherZombies)
-	return &Report{
-		Mode:         mode,
-		From:         oldest,
-		To:           now,
-		RoyalZombies: royalZombies,
-		OtherZombies: otherZombies,
-		ActiveCount:  len(tracked) - totalZombies,
-		TotalCount:   len(tracked),
-		Channels:     channelNames,
-	}, nil
+	return names
 }
 
 func FormatReport(r *Report) string {
@@ -150,37 +180,32 @@ func FormatReport(r *Report) string {
 		modeLabel = "Daily"
 	}
 
-	fromStr := r.From.Format("2006-01-02 15:04")
-	toStr := r.To.Format("2006-01-02 15:04")
-	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s to %s)\n\n", modeLabel, fromStr, toStr)
+	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s to %s)\n\n",
+		modeLabel,
+		r.From.Format("2006-01-02 15:04"),
+		r.To.Format("2006-01-02 15:04"),
+	)
 
 	if len(r.RoyalZombies) == 0 && len(r.OtherZombies) == 0 {
 		b.WriteString("Everyone posted activity! No zombies detected.\n")
 	} else {
-		if len(r.RoyalZombies) > 0 {
-			b.WriteString(":crown: *Royal Members*\n")
-			for _, z := range r.RoyalZombies {
-				fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
-			}
-			b.WriteString("\n")
-		}
-		if len(r.OtherZombies) > 0 {
-			b.WriteString(":busts_in_silhouette: *Other Members*\n")
-			for _, z := range r.OtherZombies {
-				fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
-			}
-		}
+		writeGroup(&b, ":crown: *Royal Members*", r.RoyalZombies)
+		writeGroup(&b, ":busts_in_silhouette: *Other Members*", r.OtherZombies)
 	}
 
 	fmt.Fprintf(&b, "\nActive members: %d/%d\n", r.ActiveCount, r.TotalCount)
-	fmt.Fprintf(&b, "Channels scanned: ")
-	for i, name := range r.Channels {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "#%s", name)
-	}
-	b.WriteString("\n")
+	fmt.Fprintf(&b, "Channels scanned: %d\n", len(r.Channels))
 
 	return b.String()
+}
+
+func writeGroup(b *strings.Builder, header string, members []MemberReport) {
+	if len(members) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "%s\n", header)
+	for _, z := range members {
+		fmt.Fprintf(b, "• @%s\n", z.DisplayName)
+	}
+	b.WriteString("\n")
 }

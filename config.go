@@ -22,18 +22,6 @@ type Config struct {
 	RoyalMembers    []string  `yaml:"royal_members"`
 }
 
-func (c *Config) IsRoyal(userID, displayName string) bool {
-	for _, entry := range c.RoyalMembers {
-		if entry == userID {
-			return true
-		}
-		if strings.EqualFold(entry, displayName) {
-			return true
-		}
-	}
-	return false
-}
-
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -59,11 +47,16 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) IsWhitelisted(userID, displayName string) bool {
-	for _, entry := range c.Whitelist {
-		if entry == userID {
-			return true
-		}
-		if strings.EqualFold(entry, displayName) {
+	return c.matchList(c.Whitelist, userID, displayName)
+}
+
+func (c *Config) IsRoyal(userID, displayName string) bool {
+	return c.matchList(c.RoyalMembers, userID, displayName)
+}
+
+func (c *Config) matchList(list []string, userID, displayName string) bool {
+	for _, entry := range list {
+		if entry == userID || strings.EqualFold(entry, displayName) {
 			return true
 		}
 	}
