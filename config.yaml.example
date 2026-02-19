@@ -1,0 +1,7 @@
+slack_token: "xoxb-your-token-here"
+channel_id: "C0ABK4V1KGT"
+channel_name: "medidrive-pr-review"
+report_recipient: "U01ABCDEF23"
+whitelist:
+  - "U09BOTUSER1"
+  - "product.manager"
