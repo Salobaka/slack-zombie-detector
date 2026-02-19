@@ -8,13 +8,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type Channel struct {
+	ID   string `yaml:"id"`
+	Name string `yaml:"name"`
+}
+
 type Config struct {
-	SlackToken      string   `yaml:"slack_token"`
-	ChannelID       string   `yaml:"channel_id"`
-	ChannelName     string   `yaml:"channel_name"`
-	ReportRecipient string   `yaml:"report_recipient"`
-	Whitelist       []string `yaml:"whitelist"`
-	RoyalMembers    []string `yaml:"royal_members"`
+	SlackToken      string    `yaml:"slack_token"`
+	Channels        []Channel `yaml:"channels"`
+	ReportRecipient string    `yaml:"report_recipient"`
+	Whitelist       []string  `yaml:"whitelist"`
+	RoyalMembers    []string  `yaml:"royal_members"`
 }
 
 func (c *Config) IsRoyal(userID, displayName string) bool {
@@ -43,8 +47,8 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.SlackToken == "" {
 		return nil, fmt.Errorf("slack_token is required")
 	}
-	if cfg.ChannelID == "" {
-		return nil, fmt.Errorf("channel_id is required")
+	if len(cfg.Channels) == 0 {
+		return nil, fmt.Errorf("at least one channel is required")
 	}
 	if cfg.ReportRecipient == "" {
 		return nil, fmt.Errorf("report_recipient is required")

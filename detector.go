@@ -22,7 +22,7 @@ type Report struct {
 	OtherZombies []MemberReport
 	ActiveCount  int
 	TotalCount   int
-	ChannelName  string
+	Channels     []string
 }
 
 func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, error) {
@@ -36,7 +36,8 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 	}
 	oldest = time.Date(oldest.Year(), oldest.Month(), oldest.Day(), 0, 0, 0, 0, oldest.Location())
 
-	members, err := client.FetchMembers(cfg.ChannelID)
+	// Collect members from the first channel (primary)
+	members, err := client.FetchMembers(cfg.Channels[0].ID)
 	if err != nil {
 		return nil, err
 	}
@@ -54,15 +55,17 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		tracked = append(tracked, member{id: uid, name: name})
 	}
 
-	messages, err := client.FetchMessages(cfg.ChannelID, oldest, now)
-	if err != nil {
-		return nil, err
-	}
-
+	// Scan all channels for GitHub PR activity
 	hasActivity := make(map[string]bool)
-	for _, msg := range messages {
-		if githubPR.MatchString(msg.Text) {
-			hasActivity[msg.User] = true
+	for _, ch := range cfg.Channels {
+		messages, err := client.FetchMessages(ch.ID, oldest, now)
+		if err != nil {
+			return nil, fmt.Errorf("channel #%s: %w", ch.Name, err)
+		}
+		for _, msg := range messages {
+			if githubPR.MatchString(msg.Text) {
+				hasActivity[msg.User] = true
+			}
 		}
 	}
 
@@ -79,6 +82,11 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		}
 	}
 
+	var channelNames []string
+	for _, ch := range cfg.Channels {
+		channelNames = append(channelNames, ch.Name)
+	}
+
 	totalZombies := len(royalZombies) + len(otherZombies)
 	return &Report{
 		Mode:         mode,
@@ -88,7 +96,7 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		OtherZombies: otherZombies,
 		ActiveCount:  len(tracked) - totalZombies,
 		TotalCount:   len(tracked),
-		ChannelName:  cfg.ChannelName,
+		Channels:     channelNames,
 	}, nil
 }
 
@@ -123,7 +131,14 @@ func FormatReport(r *Report) string {
 	}
 
 	fmt.Fprintf(&b, "\nActive members: %d/%d\n", r.ActiveCount, r.TotalCount)
-	fmt.Fprintf(&b, "Channel: #%s\n", r.ChannelName)
+	fmt.Fprintf(&b, "Channels scanned: ")
+	for i, name := range r.Channels {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "#%s", name)
+	}
+	b.WriteString("\n")
 
 	return b.String()
 }
