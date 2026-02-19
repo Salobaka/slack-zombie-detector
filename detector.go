@@ -28,7 +28,12 @@ type Report struct {
 func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, error) {
 	now := time.Now()
 	var oldest time.Time
-	switch mode {
+
+	timeMode := mode
+	if mode == "deep-scan" {
+		timeMode = "weekly"
+	}
+	switch timeMode {
 	case "weekly":
 		oldest = now.AddDate(0, 0, -7)
 	default:
@@ -36,7 +41,7 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 	}
 	oldest = time.Date(oldest.Year(), oldest.Month(), oldest.Day(), 0, 0, 0, 0, oldest.Location())
 
-	// Collect members from the first channel (primary)
+	// Collect members from the first configured channel (primary)
 	members, err := client.FetchMembers(cfg.Channels[0].ID)
 	if err != nil {
 		return nil, err
@@ -55,13 +60,42 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		tracked = append(tracked, member{id: uid, name: name})
 	}
 
-	// Scan all channels for GitHub PR activity
-	hasActivity := make(map[string]bool)
-	for _, ch := range cfg.Channels {
-		messages, err := client.FetchMessages(ch.ID, oldest, now)
-		if err != nil {
-			return nil, fmt.Errorf("channel #%s: %w", ch.Name, err)
+	// Determine which channels to scan
+	type scanChannel struct {
+		id   string
+		name string
+	}
+	var toScan []scanChannel
+
+	scanClient := client
+	if mode == "deep-scan" {
+		if cfg.UserToken == "" {
+			return nil, fmt.Errorf("user_token is required for deep-scan mode")
 		}
+		scanClient = NewSlackClient(cfg.UserToken)
+		userChannels, err := scanClient.FetchBotChannels()
+		if err != nil {
+			return nil, err
+		}
+		for _, ch := range userChannels {
+			toScan = append(toScan, scanChannel{id: ch.ID, name: ch.Name})
+		}
+	} else {
+		for _, ch := range cfg.Channels {
+			toScan = append(toScan, scanChannel{id: ch.ID, name: ch.Name})
+		}
+	}
+
+	// Scan channels for GitHub PR activity
+	hasActivity := make(map[string]bool)
+	var scannedNames []string
+	for _, ch := range toScan {
+		messages, err := scanClient.FetchMessages(ch.id, oldest, now)
+		if err != nil {
+			// Skip channels where access is denied
+			continue
+		}
+		scannedNames = append(scannedNames, ch.name)
 		for _, msg := range messages {
 			if githubPR.MatchString(msg.Text) {
 				hasActivity[msg.User] = true
@@ -82,9 +116,12 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		}
 	}
 
-	var channelNames []string
-	for _, ch := range cfg.Channels {
-		channelNames = append(channelNames, ch.Name)
+	channelNames := scannedNames
+	if mode != "deep-scan" {
+		channelNames = nil
+		for _, ch := range toScan {
+			channelNames = append(channelNames, ch.name)
+		}
 	}
 
 	totalZombies := len(royalZombies) + len(otherZombies)
@@ -103,9 +140,14 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 func FormatReport(r *Report) string {
 	var b strings.Builder
 
-	modeLabel := "Daily"
-	if r.Mode == "weekly" {
+	var modeLabel string
+	switch r.Mode {
+	case "weekly":
 		modeLabel = "Weekly"
+	case "deep-scan":
+		modeLabel = "Deep Scan"
+	default:
+		modeLabel = "Daily"
 	}
 
 	fromStr := r.From.Format("2006-01-02 15:04")

@@ -15,6 +15,7 @@ type Channel struct {
 
 type Config struct {
 	SlackToken      string    `yaml:"slack_token"`
+	UserToken       string    `yaml:"user_token"`
 	Channels        []Channel `yaml:"channels"`
 	ReportRecipient string    `yaml:"report_recipient"`
 	Whitelist       []string  `yaml:"whitelist"`

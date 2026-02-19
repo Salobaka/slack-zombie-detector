@@ -92,6 +92,38 @@ func (sc *SlackClient) GetUserDisplayName(userID string) (string, error) {
 	return user.RealName, nil
 }
 
+func (sc *SlackClient) FetchBotChannels() ([]slack.Channel, error) {
+	var all []slack.Channel
+	cursor := ""
+
+	for {
+		params := &slack.GetConversationsParameters{
+			Types:           []string{"public_channel", "private_channel"},
+			ExcludeArchived: true,
+			Limit:           200,
+			Cursor:          cursor,
+		}
+
+		channels, nextCursor, err := sc.api.GetConversations(params)
+		if err != nil {
+			if rle, ok := err.(*slack.RateLimitedError); ok {
+				time.Sleep(rle.RetryAfter)
+				continue
+			}
+			return nil, fmt.Errorf("fetching channels: %w", err)
+		}
+
+		all = append(all, channels...)
+
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	return all, nil
+}
+
 func (sc *SlackClient) SendDM(userID, text string) error {
 	_, _, err := sc.api.PostMessage(userID, slack.MsgOptionText(text, false))
 	if err != nil {
