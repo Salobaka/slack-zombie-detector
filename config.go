@@ -14,6 +14,19 @@ type Config struct {
 	ChannelName     string   `yaml:"channel_name"`
 	ReportRecipient string   `yaml:"report_recipient"`
 	Whitelist       []string `yaml:"whitelist"`
+	RoyalMembers    []string `yaml:"royal_members"`
+}
+
+func (c *Config) IsRoyal(userID, displayName string) bool {
+	for _, entry := range c.RoyalMembers {
+		if entry == userID {
+			return true
+		}
+		if strings.EqualFold(entry, displayName) {
+			return true
+		}
+	}
+	return false
 }
 
 func LoadConfig(path string) (*Config, error) {

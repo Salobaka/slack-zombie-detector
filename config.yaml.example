@@ -1,7 +1,9 @@
 slack_token: "xoxb-your-token-here"
 channel_id: "C0ABK4V1KGT"
 channel_name: "medidrive-pr-review"
-report_recipient: "U01ABCDEF23"
+report_recipient: "U0XXXXXXXXX"
 whitelist:
-  - "U09BOTUSER1"
-  - "product.manager"
+  - "Stats_App"       # Bot
+  - "U09BOTUSER1"     # Example: by user ID
+royal_members:
+  - "Display Name"    # Example: by display name

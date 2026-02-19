@@ -7,26 +7,19 @@ import (
 	"time"
 )
 
-var (
-	linearRe = regexp.MustCompile(`linear\.app/\S+`)
-	githubPR = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/\d+`)
-)
-
-type ActivityStatus struct {
-	HasLinear bool
-	HasGitHub bool
-}
+var githubPR = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/\d+`)
 
 type MemberReport struct {
 	UserID      string
 	DisplayName string
-	Missing     []string
 }
 
 type Report struct {
 	Mode         string
-	Date         string
-	Zombies      []MemberReport
+	From         time.Time
+	To           time.Time
+	RoyalZombies []MemberReport
+	OtherZombies []MemberReport
 	ActiveCount  int
 	TotalCount   int
 	ChannelName  string
@@ -37,17 +30,17 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 	var oldest time.Time
 	switch mode {
 	case "weekly":
-		oldest = now.Add(-7 * 24 * time.Hour)
+		oldest = now.AddDate(0, 0, -7)
 	default:
-		oldest = now.Add(-24 * time.Hour)
+		oldest = now.AddDate(0, 0, -1)
 	}
+	oldest = time.Date(oldest.Year(), oldest.Month(), oldest.Day(), 0, 0, 0, 0, oldest.Location())
 
 	members, err := client.FetchMembers(cfg.ChannelID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Resolve display names and filter whitelist
 	type member struct {
 		id   string
 		name string
@@ -66,52 +59,36 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		return nil, err
 	}
 
-	// Build activity map
-	activity := make(map[string]*ActivityStatus)
-	for _, m := range tracked {
-		activity[m.id] = &ActivityStatus{}
+	hasActivity := make(map[string]bool)
+	for _, msg := range messages {
+		if githubPR.MatchString(msg.Text) {
+			hasActivity[msg.User] = true
+		}
 	}
 
-	for _, msg := range messages {
-		status, ok := activity[msg.User]
-		if !ok {
+	var royalZombies, otherZombies []MemberReport
+	for _, m := range tracked {
+		if hasActivity[m.id] {
 			continue
 		}
-		if linearRe.MatchString(msg.Text) {
-			status.HasLinear = true
-		}
-		if githubPR.MatchString(msg.Text) {
-			status.HasGitHub = true
-		}
-	}
-
-	// Build zombie list
-	var zombies []MemberReport
-	for _, m := range tracked {
-		status := activity[m.id]
-		var missing []string
-		if !status.HasLinear {
-			missing = append(missing, "Linear task")
-		}
-		if !status.HasGitHub {
-			missing = append(missing, "GitHub PR")
-		}
-		if len(missing) > 0 {
-			zombies = append(zombies, MemberReport{
-				UserID:      m.id,
-				DisplayName: m.name,
-				Missing:     missing,
-			})
+		mr := MemberReport{UserID: m.id, DisplayName: m.name}
+		if cfg.IsRoyal(m.id, m.name) {
+			royalZombies = append(royalZombies, mr)
+		} else {
+			otherZombies = append(otherZombies, mr)
 		}
 	}
 
+	totalZombies := len(royalZombies) + len(otherZombies)
 	return &Report{
-		Mode:        mode,
-		Date:        now.Format("2006-01-02"),
-		Zombies:     zombies,
-		ActiveCount: len(tracked) - len(zombies),
-		TotalCount:  len(tracked),
-		ChannelName: cfg.ChannelName,
+		Mode:         mode,
+		From:         oldest,
+		To:           now,
+		RoyalZombies: royalZombies,
+		OtherZombies: otherZombies,
+		ActiveCount:  len(tracked) - totalZombies,
+		TotalCount:   len(tracked),
+		ChannelName:  cfg.ChannelName,
 	}, nil
 }
 
@@ -123,14 +100,25 @@ func FormatReport(r *Report) string {
 		modeLabel = "Weekly"
 	}
 
-	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s)\n\n", modeLabel, r.Date)
+	fromStr := r.From.Format("2006-01-02 15:04")
+	toStr := r.To.Format("2006-01-02 15:04")
+	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s to %s)\n\n", modeLabel, fromStr, toStr)
 
-	if len(r.Zombies) == 0 {
+	if len(r.RoyalZombies) == 0 && len(r.OtherZombies) == 0 {
 		b.WriteString("Everyone posted activity! No zombies detected.\n")
 	} else {
-		b.WriteString("No activity detected from:\n")
-		for _, z := range r.Zombies {
-			fmt.Fprintf(&b, "• @%s — missing: %s\n", z.DisplayName, strings.Join(z.Missing, ", "))
+		if len(r.RoyalZombies) > 0 {
+			b.WriteString(":crown: *Royal Members*\n")
+			for _, z := range r.RoyalZombies {
+				fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
+			}
+			b.WriteString("\n")
+		}
+		if len(r.OtherZombies) > 0 {
+			b.WriteString(":busts_in_silhouette: *Other Members*\n")
+			for _, z := range r.OtherZombies {
+				fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
+			}
 		}
 	}
 
