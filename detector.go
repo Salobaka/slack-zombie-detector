@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -91,6 +92,16 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride i
 			}
 		}
 	}
+
+	sort.Slice(royalZombies, func(i, j int) bool {
+		return strings.ToLower(royalZombies[i].DisplayName) < strings.ToLower(royalZombies[j].DisplayName)
+	})
+	sort.Slice(otherZombies, func(i, j int) bool {
+		return strings.ToLower(otherZombies[i].DisplayName) < strings.ToLower(otherZombies[j].DisplayName)
+	})
+	sort.Slice(active, func(i, j int) bool {
+		return strings.ToLower(active[i].DisplayName) < strings.ToLower(active[j].DisplayName)
+	})
 
 	channels := scanned
 	if mode != "deep-scan" {
@@ -214,8 +225,8 @@ func FormatReport(r *Report) string {
 
 	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s to %s)\n\n",
 		modeLabel,
-		r.From.Format("2006-01-02 15:04"),
-		r.To.Format("2006-01-02 15:04"),
+		r.From.Format("Mon 2006-01-02 15:04"),
+		r.To.Format("Mon 2006-01-02 15:04"),
 	)
 
 	// Zombies
