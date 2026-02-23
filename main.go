@@ -38,16 +38,20 @@ func main() {
 		log.Fatalf("detect: %v", err)
 	}
 
-	text := FormatReport(report)
+	messages := FormatReport(report)
 
 	if *dryRun {
-		fmt.Print(text)
+		for _, msg := range messages {
+			fmt.Print(msg)
+		}
 		return
 	}
 
-	if err := client.SendDM(cfg.ReportRecipient, text); err != nil {
-		log.Fatalf("send: %v", err)
+	for _, msg := range messages {
+		if err := client.SendDM(cfg.ReportRecipient, msg); err != nil {
+			log.Fatalf("send: %v", err)
+		}
 	}
 
-	fmt.Println("Report sent.")
+	fmt.Printf("Report sent (%d messages).\n", len(messages))
 }

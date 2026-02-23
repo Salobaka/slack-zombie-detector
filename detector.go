@@ -65,7 +65,7 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride i
 	for _, uid := range memberIDs {
 		name := names[uid]
 		if name == "" {
-			name = uid
+			name, _ = client.GetUserDisplayName(uid)
 		}
 		if cfg.IsWhitelisted(uid, name) {
 			continue
@@ -163,43 +163,82 @@ func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (
 	return userMsgs, scanned
 }
 
-func FormatReport(r *Report) string {
-	var b strings.Builder
+const slackMaxLen = 3500
 
+func FormatReport(r *Report) []string {
 	modeLabels := map[string]string{"weekly": "Weekly", "deep-scan": "Deep Scan"}
 	label := modeLabels[r.Mode]
 	if label == "" {
 		label = "Daily"
 	}
 
-	fmt.Fprintf(&b, ":zombie: Zombie Report (%s — %s to %s)\n\n",
-		label, r.From.Format("Mon 2006-01-02 15:04"), r.To.Format("Mon 2006-01-02 15:04"))
+	// Collect all blocks (each block = one logical unit that shouldn't be split)
+	var blocks []string
+
+	blocks = append(blocks, fmt.Sprintf(":zombie: Zombie Report (%s — %s to %s)\n",
+		label, r.From.Format("Mon 2006-01-02 15:04"), r.To.Format("Mon 2006-01-02 15:04")))
 
 	if len(r.RoyalZombies)+len(r.OtherZombies) == 0 {
-		b.WriteString("Everyone posted activity! No zombies detected.\n\n")
+		blocks = append(blocks, "Everyone posted activity! No zombies detected.\n")
 	} else {
-		writeGroup(&b, ":crown: *Royal Members*", r.RoyalZombies)
-		writeGroup(&b, ":busts_in_silhouette: *Other Members*", r.OtherZombies)
+		if s := formatGroup(":crown: *Royal Members*", r.RoyalZombies); s != "" {
+			blocks = append(blocks, s)
+		}
+		if s := formatGroup(":busts_in_silhouette: *Other Members*", r.OtherZombies); s != "" {
+			blocks = append(blocks, s)
+		}
 	}
 
 	if len(r.Active) > 0 {
-		b.WriteString(":white_check_mark: *Active Members*\n")
+		blocks = append(blocks, ":white_check_mark: *Active Members*\n")
 		for _, a := range r.Active {
-			if r.ByDay {
-				fmt.Fprintf(&b, "• @%s\n", a.DisplayName)
-				writeByDay(&b, a.Messages, r.Workspace)
-			} else {
-				links := make([]string, len(a.Messages))
-				for i, msg := range a.Messages {
-					links[i] = fmt.Sprintf("<%s|%d>", msg.URL(r.Workspace), i+1)
-				}
-				fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
-			}
+			blocks = append(blocks, formatActiveMember(a, r.ByDay, r.Workspace))
 		}
-		b.WriteString("\n")
 	}
 
-	fmt.Fprintf(&b, "Active: %d/%d | Channels: %d\n", len(r.Active), r.TotalCount, r.ChannelCount)
+	blocks = append(blocks, fmt.Sprintf("\nActive: %d/%d | Channels: %d\n", len(r.Active), r.TotalCount, r.ChannelCount))
+
+	// Pack blocks into messages without exceeding Slack limit
+	var messages []string
+	var current strings.Builder
+	for _, block := range blocks {
+		if current.Len()+len(block) > slackMaxLen && current.Len() > 0 {
+			messages = append(messages, current.String())
+			current.Reset()
+		}
+		current.WriteString(block)
+	}
+	if current.Len() > 0 {
+		messages = append(messages, current.String())
+	}
+	return messages
+}
+
+func formatActiveMember(a ActiveMember, byDay bool, workspace string) string {
+	var b strings.Builder
+	if byDay {
+		fmt.Fprintf(&b, "• @%s\n", a.DisplayName)
+		writeByDay(&b, a.Messages, workspace)
+	} else {
+		links := make([]string, len(a.Messages))
+		for i, msg := range a.Messages {
+			links[i] = fmt.Sprintf("<%s|%d>", msg.URL(workspace), i+1)
+		}
+		fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
+	}
+	return b.String()
+}
+
+func formatGroup(header string, members []MemberReport) string {
+	if len(members) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", header)
+	for _, z := range members {
+		fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -233,13 +272,3 @@ func writeByDay(b *strings.Builder, msgs []MessageLink, workspace string) {
 	}
 }
 
-func writeGroup(b *strings.Builder, header string, members []MemberReport) {
-	if len(members) == 0 {
-		return
-	}
-	fmt.Fprintf(b, "%s\n", header)
-	for _, z := range members {
-		fmt.Fprintf(b, "• @%s\n", z.DisplayName)
-	}
-	b.WriteString("\n")
-}

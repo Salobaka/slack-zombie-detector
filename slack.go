@@ -107,6 +107,20 @@ func (sc *SlackClient) FetchUserNames() (map[string]string, error) {
 	return names, nil
 }
 
+func (sc *SlackClient) GetUserDisplayName(userID string) (string, error) {
+	user, err := sc.api.GetUserInfo(userID)
+	if err != nil {
+		return userID, err
+	}
+	if user.Profile.DisplayName != "" {
+		return user.Profile.DisplayName, nil
+	}
+	if user.RealName != "" {
+		return user.RealName, nil
+	}
+	return user.Name, nil
+}
+
 func (sc *SlackClient) SendDM(userID, text string) error {
 	_, _, err := sc.api.PostMessage(userID, slack.MsgOptionText(text, false))
 	if err != nil {
