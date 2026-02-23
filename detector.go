@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,12 @@ func (m MessageLink) URL(workspace string) string {
 		workspace, m.ChannelID, strings.Replace(m.Timestamp, ".", "", 1))
 }
 
+func (m MessageLink) Time() time.Time {
+	parts := strings.Split(m.Timestamp, ".")
+	sec, _ := strconv.ParseInt(parts[0], 10, 64)
+	return time.Unix(sec, 0)
+}
+
 type MemberReport struct{ DisplayName string }
 type ActiveMember struct {
 	DisplayName string
@@ -29,6 +36,7 @@ type ActiveMember struct {
 type Report struct {
 	Mode, Workspace  string
 	From, To         time.Time
+	ByDay            bool
 	RoyalZombies     []MemberReport
 	OtherZombies     []MemberReport
 	Active           []ActiveMember
@@ -39,7 +47,7 @@ type Report struct {
 type scanTarget struct{ id, name string }
 type member struct{ id, name string }
 
-func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride int) (*Report, error) {
+func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride int, byDay bool) (*Report, error) {
 	from, to := timeRange(mode, daysOverride)
 
 	// Batch-fetch all user names (1 API call instead of N)
@@ -91,7 +99,7 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride i
 
 	return &Report{
 		Mode: mode, Workspace: cfg.Workspace,
-		From: from, To: to,
+		From: from, To: to, ByDay: byDay,
 		RoyalZombies: royalZombies, OtherZombies: otherZombies,
 		Active: active, TotalCount: len(tracked), ChannelCount: channelCount,
 	}, nil
@@ -177,17 +185,52 @@ func FormatReport(r *Report) string {
 	if len(r.Active) > 0 {
 		b.WriteString(":white_check_mark: *Active Members*\n")
 		for _, a := range r.Active {
-			links := make([]string, len(a.Messages))
-			for i, msg := range a.Messages {
-				links[i] = fmt.Sprintf("<%s|%d>", msg.URL(r.Workspace), i+1)
+			if r.ByDay {
+				fmt.Fprintf(&b, "• @%s\n", a.DisplayName)
+				writeByDay(&b, a.Messages, r.Workspace)
+			} else {
+				links := make([]string, len(a.Messages))
+				for i, msg := range a.Messages {
+					links[i] = fmt.Sprintf("<%s|%d>", msg.URL(r.Workspace), i+1)
+				}
+				fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
 			}
-			fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
 		}
 		b.WriteString("\n")
 	}
 
 	fmt.Fprintf(&b, "Active: %d/%d | Channels: %d\n", len(r.Active), r.TotalCount, r.ChannelCount)
 	return b.String()
+}
+
+func writeByDay(b *strings.Builder, msgs []MessageLink, workspace string) {
+	type dayGroup struct {
+		date  time.Time
+		label string
+		msgs  []MessageLink
+	}
+	groups := make(map[string]*dayGroup)
+	for _, msg := range msgs {
+		t := msg.Time()
+		key := t.Format("2006-01-02")
+		if g, ok := groups[key]; ok {
+			g.msgs = append(g.msgs, msg)
+		} else {
+			groups[key] = &dayGroup{date: t, label: t.Format("Mon 01/02"), msgs: []MessageLink{msg}}
+		}
+	}
+	sorted := make([]*dayGroup, 0, len(groups))
+	for _, g := range groups {
+		sorted = append(sorted, g)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].date.Before(sorted[j].date) })
+	for _, g := range sorted {
+		links := make([]string, len(g.msgs))
+		for i, msg := range g.msgs {
+			links[i] = fmt.Sprintf("<%s|%d>", msg.URL(workspace), i+1)
+		}
+		fmt.Fprintf(b, "    %s: %s\n", g.label, strings.Join(links, " "))
+	}
 }
 
 func writeGroup(b *strings.Builder, header string, members []MemberReport) {

@@ -17,6 +17,7 @@ func main() {
 	mode := flag.String("mode", "daily", "Report mode: daily, weekly, or deep-scan")
 	days := flag.Int("days", 0, "Override time range in days (0 = use mode default)")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
+	byDay := flag.Bool("by-day", false, "Group active member activity by day")
 	dryRun := flag.Bool("dry-run", false, "Print report to stdout instead of sending DM")
 	flag.Parse()
 
@@ -32,7 +33,7 @@ func main() {
 
 	client := NewSlackClient(cfg.SlackToken)
 
-	report, err := DetectZombies(client, cfg, *mode, *days)
+	report, err := DetectZombies(client, cfg, *mode, *days, *byDay)
 	if err != nil {
 		log.Fatalf("detect: %v", err)
 	}
