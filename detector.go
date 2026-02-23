@@ -68,8 +68,11 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 func timeRange(mode string) (from, to time.Time) {
 	to = time.Now()
 	days := -1
-	if mode == "weekly" || mode == "deep-scan" {
+	switch mode {
+	case "weekly":
 		days = -7
+	case "deep-scan":
+		days = -2
 	}
 	from = to.AddDate(0, 0, days)
 	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, from.Location())
