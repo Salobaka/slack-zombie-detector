@@ -51,8 +51,8 @@ type member struct {
 	name string
 }
 
-func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, error) {
-	from, to := timeRange(mode)
+func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride int) (*Report, error) {
+	from, to := timeRange(mode, daysOverride)
 
 	tracked, err := resolveMembers(client, cfg)
 	if err != nil {
@@ -110,16 +110,19 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 	}, nil
 }
 
-func timeRange(mode string) (from, to time.Time) {
+func timeRange(mode string, daysOverride int) (from, to time.Time) {
 	to = time.Now()
-	days := -1
+	days := 1
 	switch mode {
 	case "weekly":
-		days = -7
+		days = 7
 	case "deep-scan":
-		days = -2
+		days = 2
 	}
-	from = to.AddDate(0, 0, days)
+	if daysOverride > 0 {
+		days = daysOverride
+	}
+	from = to.AddDate(0, 0, -days)
 	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, from.Location())
 	return
 }
