@@ -9,23 +9,44 @@ import (
 
 var githubPR = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/\d+`)
 
+type MessageLink struct {
+	ChannelID string
+	Timestamp string
+}
+
+func (m MessageLink) URL(workspace string) string {
+	ts := strings.Replace(m.Timestamp, ".", "", 1)
+	return fmt.Sprintf("https://%s.slack.com/archives/%s/p%s", workspace, m.ChannelID, ts)
+}
+
 type MemberReport struct {
 	UserID      string
 	DisplayName string
+}
+
+type ActiveMember struct {
+	DisplayName string
+	Messages    []MessageLink
 }
 
 type Report struct {
 	Mode         string
 	From         time.Time
 	To           time.Time
+	Workspace    string
 	RoyalZombies []MemberReport
 	OtherZombies []MemberReport
-	ActiveCount  int
+	Active       []ActiveMember
 	TotalCount   int
 	Channels     []string
 }
 
 type scanTarget struct {
+	id   string
+	name string
+}
+
+type member struct {
 	id   string
 	name string
 }
@@ -43,23 +64,47 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string) (*Report, erro
 		return nil, err
 	}
 
-	hasActivity, scanned := scanForPRs(scanClient, targets, from, to)
+	userMessages, scanned := scanForPRs(scanClient, targets, from, to)
 
-	royalZombies, otherZombies := classifyZombies(tracked, hasActivity, cfg)
+	// Build tracked member set for quick lookup
+	trackedSet := make(map[string]string) // id -> name
+	for _, m := range tracked {
+		trackedSet[m.id] = m.name
+	}
+
+	var royalZombies, otherZombies []MemberReport
+	var active []ActiveMember
+
+	for _, m := range tracked {
+		msgs, found := userMessages[m.id]
+		if found {
+			active = append(active, ActiveMember{
+				DisplayName: m.name,
+				Messages:    msgs,
+			})
+		} else {
+			mr := MemberReport{UserID: m.id, DisplayName: m.name}
+			if cfg.IsRoyal(m.id, m.name) {
+				royalZombies = append(royalZombies, mr)
+			} else {
+				otherZombies = append(otherZombies, mr)
+			}
+		}
+	}
 
 	channels := scanned
 	if mode != "deep-scan" {
 		channels = targetNames(targets)
 	}
 
-	totalZombies := len(royalZombies) + len(otherZombies)
 	return &Report{
 		Mode:         mode,
 		From:         from,
 		To:           to,
+		Workspace:    cfg.Workspace,
 		RoyalZombies: royalZombies,
 		OtherZombies: otherZombies,
-		ActiveCount:  len(tracked) - totalZombies,
+		Active:       active,
 		TotalCount:   len(tracked),
 		Channels:     channels,
 	}, nil
@@ -77,11 +122,6 @@ func timeRange(mode string) (from, to time.Time) {
 	from = to.AddDate(0, 0, days)
 	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, from.Location())
 	return
-}
-
-type member struct {
-	id   string
-	name string
 }
 
 func resolveMembers(client *SlackClient, cfg *Config) ([]member, error) {
@@ -127,8 +167,8 @@ func scanTargets(client *SlackClient, cfg *Config, mode string) (*SlackClient, [
 	return userClient, targets, nil
 }
 
-func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (map[string]bool, []string) {
-	hasActivity := make(map[string]bool)
+func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (map[string][]MessageLink, []string) {
+	userMessages := make(map[string][]MessageLink)
 	var scanned []string
 
 	for _, ch := range targets {
@@ -139,27 +179,13 @@ func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (
 		scanned = append(scanned, ch.name)
 		for _, msg := range messages {
 			if githubPR.MatchString(msg.Text) {
-				hasActivity[msg.User] = true
+				link := MessageLink{ChannelID: ch.id, Timestamp: msg.Timestamp}
+				userMessages[msg.User] = append(userMessages[msg.User], link)
 			}
 		}
 	}
 
-	return hasActivity, scanned
-}
-
-func classifyZombies(tracked []member, hasActivity map[string]bool, cfg *Config) (royal, other []MemberReport) {
-	for _, m := range tracked {
-		if hasActivity[m.id] {
-			continue
-		}
-		mr := MemberReport{UserID: m.id, DisplayName: m.name}
-		if cfg.IsRoyal(m.id, m.name) {
-			royal = append(royal, mr)
-		} else {
-			other = append(other, mr)
-		}
-	}
-	return
+	return userMessages, scanned
 }
 
 func targetNames(targets []scanTarget) []string {
@@ -189,20 +215,35 @@ func FormatReport(r *Report) string {
 		r.To.Format("2006-01-02 15:04"),
 	)
 
-	if len(r.RoyalZombies) == 0 && len(r.OtherZombies) == 0 {
-		b.WriteString("Everyone posted activity! No zombies detected.\n")
+	// Zombies
+	totalZombies := len(r.RoyalZombies) + len(r.OtherZombies)
+	if totalZombies == 0 {
+		b.WriteString("Everyone posted activity! No zombies detected.\n\n")
 	} else {
-		writeGroup(&b, ":crown: *Royal Members*", r.RoyalZombies)
-		writeGroup(&b, ":busts_in_silhouette: *Other Members*", r.OtherZombies)
+		writeZombieGroup(&b, ":crown: *Royal Members*", r.RoyalZombies)
+		writeZombieGroup(&b, ":busts_in_silhouette: *Other Members*", r.OtherZombies)
 	}
 
-	fmt.Fprintf(&b, "\nActive members: %d/%d\n", r.ActiveCount, r.TotalCount)
-	fmt.Fprintf(&b, "Channels scanned: %d\n", len(r.Channels))
+	// Active members
+	if len(r.Active) > 0 {
+		b.WriteString(":white_check_mark: *Active Members*\n")
+		for _, a := range r.Active {
+			var links []string
+			for i, msg := range a.Messages {
+				url := msg.URL(r.Workspace)
+				links = append(links, fmt.Sprintf("<%s|%d>", url, i+1))
+			}
+			fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
+		}
+		b.WriteString("\n")
+	}
+
+	fmt.Fprintf(&b, "Active: %d/%d | Channels: %d\n", len(r.Active), r.TotalCount, len(r.Channels))
 
 	return b.String()
 }
 
-func writeGroup(b *strings.Builder, header string, members []MemberReport) {
+func writeZombieGroup(b *strings.Builder, header string, members []MemberReport) {
 	if len(members) == 0 {
 		return
 	}
