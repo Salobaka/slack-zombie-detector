@@ -14,10 +14,10 @@ var validModes = map[string]bool{
 }
 
 func main() {
-	mode := flag.String("mode", "daily", "Report mode: daily, weekly, or deep-scan")
+	mode := flag.String("mode", "deep-scan", "Report mode: daily, weekly, or deep-scan")
 	days := flag.Int("days", 0, "Override time range in days (0 = use mode default)")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
-	byDay := flag.Bool("by-day", false, "Group active member activity by day")
+	byDay := flag.Bool("by-day", true, "Group active member activity by day")
 	dryRun := flag.Bool("dry-run", false, "Print report to stdout instead of sending DM")
 	flag.Parse()
 
