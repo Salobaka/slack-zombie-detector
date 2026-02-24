@@ -14,6 +14,7 @@ var githubPR = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/\d+`)
 type MessageLink struct {
 	ChannelID string
 	Timestamp string
+	PRURL     string
 }
 
 func (m MessageLink) URL(workspace string) string {
@@ -155,8 +156,8 @@ func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (
 		}
 		scanned++
 		for _, msg := range messages {
-			if githubPR.MatchString(msg.Text) {
-				userMsgs[msg.User] = append(userMsgs[msg.User], MessageLink{ch.id, msg.Timestamp})
+			if pr := githubPR.FindString(msg.Text); pr != "" {
+				userMsgs[msg.User] = append(userMsgs[msg.User], MessageLink{ch.id, msg.Timestamp, pr})
 			}
 		}
 	}
@@ -217,14 +218,33 @@ func FormatReport(r *Report) []string {
 func formatActiveMember(a ActiveMember, byDay bool, workspace string) string {
 	var b strings.Builder
 	if byDay {
-		fmt.Fprintf(&b, "• @%s\n", a.DisplayName)
-		writeByDay(&b, a.Messages, workspace)
+		dayParts := formatDayLinks(a.Messages, workspace)
+		fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(dayParts, " "))
 	} else {
-		links := make([]string, len(a.Messages))
-		for i, msg := range a.Messages {
-			links[i] = fmt.Sprintf("<%s|%d>", msg.URL(workspace), i+1)
+		type prEntry struct {
+			link  MessageLink
+			count int
 		}
-		fmt.Fprintf(&b, "• @%s — %s\n", a.DisplayName, strings.Join(links, " "))
+		seen := make(map[string]*prEntry)
+		var order []string
+		for _, msg := range a.Messages {
+			if e, ok := seen[msg.PRURL]; ok {
+				e.count++
+			} else {
+				seen[msg.PRURL] = &prEntry{link: msg, count: 1}
+				order = append(order, msg.PRURL)
+			}
+		}
+		links := make([]string, len(order))
+		for i, pr := range order {
+			e := seen[pr]
+			if e.count > 1 {
+				links[i] = fmt.Sprintf("<%s|%d>(%d)", e.link.URL(workspace), i+1, e.count)
+			} else {
+				links[i] = fmt.Sprintf("<%s|%d>", e.link.URL(workspace), i+1)
+			}
+		}
+		fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(links, " "))
 	}
 	return b.String()
 }
@@ -233,20 +253,17 @@ func formatGroup(header string, members []MemberReport) string {
 	if len(members) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", header)
-	for _, z := range members {
-		fmt.Fprintf(&b, "• @%s\n", z.DisplayName)
+	names := make([]string, len(members))
+	for i, z := range members {
+		names[i] = "@" + z.DisplayName
 	}
-	b.WriteString("\n")
-	return b.String()
+	return fmt.Sprintf("%s\n%s\n\n", header, strings.Join(names, " | "))
 }
 
-func writeByDay(b *strings.Builder, msgs []MessageLink, workspace string) {
+func formatDayLinks(msgs []MessageLink, workspace string) []string {
 	type dayGroup struct {
-		date  time.Time
-		label string
-		msgs  []MessageLink
+		date time.Time
+		msgs []MessageLink
 	}
 	groups := make(map[string]*dayGroup)
 	for _, msg := range msgs {
@@ -255,7 +272,7 @@ func writeByDay(b *strings.Builder, msgs []MessageLink, workspace string) {
 		if g, ok := groups[key]; ok {
 			g.msgs = append(g.msgs, msg)
 		} else {
-			groups[key] = &dayGroup{date: t, label: t.Format("Mon 01/02"), msgs: []MessageLink{msg}}
+			groups[key] = &dayGroup{date: t, msgs: []MessageLink{msg}}
 		}
 	}
 	sorted := make([]*dayGroup, 0, len(groups))
@@ -263,12 +280,70 @@ func writeByDay(b *strings.Builder, msgs []MessageLink, workspace string) {
 		sorted = append(sorted, g)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].date.Before(sorted[j].date) })
-	for _, g := range sorted {
-		links := make([]string, len(g.msgs))
-		for i, msg := range g.msgs {
-			links[i] = fmt.Sprintf("<%s|%d>", msg.URL(workspace), i+1)
-		}
-		fmt.Fprintf(b, "    %s: %s\n", g.label, strings.Join(links, " "))
+
+	type dayEntry struct {
+		text    string
+		newWeek bool
 	}
+	var entries []dayEntry
+	for i, g := range sorted {
+		newWeek := false
+		if i > 0 {
+			prevWeekday := sorted[i-1].date.Weekday()
+			currWeekday := g.date.Weekday()
+			if prevWeekday == time.Sunday || (currWeekday != time.Sunday && currWeekday < prevWeekday) {
+				newWeek = true
+			}
+		}
+
+		// Deduplicate by PR URL, keep first message link per unique PR
+		type prEntry struct {
+			link  MessageLink
+			count int
+		}
+		seen := make(map[string]*prEntry)
+		var prOrder []string
+		for _, msg := range g.msgs {
+			if e, ok := seen[msg.PRURL]; ok {
+				e.count++
+			} else {
+				seen[msg.PRURL] = &prEntry{link: msg, count: 1}
+				prOrder = append(prOrder, msg.PRURL)
+			}
+		}
+
+		links := make([]string, len(prOrder))
+		for j, pr := range prOrder {
+			e := seen[pr]
+			if e.count > 1 {
+				links[j] = fmt.Sprintf("<%s|%d>(%d)", e.link.URL(workspace), j+1, e.count)
+			} else {
+				links[j] = fmt.Sprintf("<%s|%d>", e.link.URL(workspace), j+1)
+			}
+		}
+
+		dayLabel := g.date.Format("Mon")
+		if wd := g.date.Weekday(); wd == time.Saturday || wd == time.Sunday {
+			dayLabel = fmt.Sprintf("*%s*", dayLabel)
+		}
+
+		entries = append(entries, dayEntry{
+			text:    fmt.Sprintf("%s %d: %s", dayLabel, g.date.Day(), strings.Join(links, " ")),
+			newWeek: newWeek,
+		})
+	}
+
+	var parts []string
+	for i, e := range entries {
+		if i > 0 {
+			if e.newWeek {
+				parts = append(parts, "||")
+			} else {
+				parts = append(parts, "|")
+			}
+		}
+		parts = append(parts, e.text)
+	}
+	return parts
 }
 
