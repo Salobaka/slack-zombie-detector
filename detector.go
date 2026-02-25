@@ -113,7 +113,7 @@ func timeRange(mode string, daysOverride int) (from, to time.Time) {
 	case "weekly":
 		days = 7
 	case "deep-scan":
-		days = 2
+		days = 1
 	}
 	if daysOverride > 0 {
 		days = daysOverride
