@@ -7,14 +7,14 @@ import (
 	"os"
 )
 
-var validModes = map[string]bool{
-	"daily":     true,
-	"weekly":    true,
-	"deep-scan": true,
-}
+var (
+	validModes   = map[string]bool{"daily": true, "weekly": true, "deep-scan": true}
+	validSources = map[string]bool{"slack": true, "github": true, "both": true}
+)
 
 func main() {
 	mode := flag.String("mode", "deep-scan", "Report mode: daily, weekly, or deep-scan")
+	source := flag.String("source", "both", "Data source: slack, github, or both")
 	days := flag.Int("days", 0, "Override time range in days (0 = use mode default)")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	byDay := flag.Bool("by-day", true, "Group active member activity by day")
@@ -25,6 +25,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "invalid mode %q: must be daily, weekly, or deep-scan\n", *mode)
 		os.Exit(1)
 	}
+	if !validSources[*source] {
+		fmt.Fprintf(os.Stderr, "invalid source %q: must be slack, github, or both\n", *source)
+		os.Exit(1)
+	}
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
@@ -33,7 +37,7 @@ func main() {
 
 	client := NewSlackClient(cfg.SlackToken)
 
-	report, err := DetectZombies(client, cfg, *mode, *days, *byDay)
+	report, err := DetectZombies(client, cfg, *mode, *source, *days, *byDay)
 	if err != nil {
 		log.Fatalf("detect: %v", err)
 	}

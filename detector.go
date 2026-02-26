@@ -29,16 +29,24 @@ func (m MessageLink) Time() time.Time {
 }
 
 type MemberReport struct{ DisplayName string }
+
+type PRLink struct {
+	URL     string
+	Title   string
+	Created time.Time
+}
+
 type ActiveMember struct {
-	DisplayName string
-	Messages    []MessageLink
+	DisplayName  string
+	Messages     []MessageLink
+	GitHubPRs    []PRLink
 }
 
 type Report struct {
-	Mode, Workspace  string
-	From, To         time.Time
-	ByDay            bool
-	RoyalZombies     []MemberReport
+	Mode, Source, Workspace string
+	From, To               time.Time
+	ByDay                  bool
+	RoyalZombies           []MemberReport
 	OtherZombies     []MemberReport
 	Active           []ActiveMember
 	TotalCount       int
@@ -48,8 +56,10 @@ type Report struct {
 type scanTarget struct{ id, name string }
 type member struct{ id, name string }
 
-func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride int, byDay bool) (*Report, error) {
+func DetectZombies(client *SlackClient, cfg *Config, mode, source string, daysOverride int, byDay bool) (*Report, error) {
 	from, to := timeRange(mode, daysOverride)
+	useSlack := source == "slack" || source == "both"
+	useGitHub := source == "github" || source == "both"
 
 	// Batch-fetch all user names (1 API call instead of N)
 	names, err := client.FetchUserNames()
@@ -74,18 +84,40 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride i
 		tracked = append(tracked, member{uid, name})
 	}
 
-	scanClient, targets, err := scanTargets(client, cfg, mode)
-	if err != nil {
-		return nil, err
+	// Slack scan
+	userMessages := make(map[string][]MessageLink)
+	channelCount := 0
+	if useSlack {
+		scanClient, targets, err := scanTargets(client, cfg, mode)
+		if err != nil {
+			return nil, err
+		}
+		userMessages, channelCount = scanForPRs(scanClient, targets, from, to)
 	}
 
-	userMessages, channelCount := scanForPRs(scanClient, targets, from, to)
+	// GitHub scan
+	ghPRsByName := make(map[string][]PRLink)
+	if useGitHub && cfg.GitHubToken != "" && cfg.GitHubOrg != "" {
+		ghClient := NewGitHubClient(cfg.GitHubToken, cfg.GitHubOrg)
+		prs, err := ghClient.FetchPRs(from, to)
+		if err == nil {
+			for _, pr := range prs {
+				if displayName, ok := cfg.GitHubUsers[pr.Author]; ok {
+					ghPRsByName[displayName] = append(ghPRsByName[displayName], PRLink{
+						URL: pr.HTMLURL, Title: pr.Title, Created: pr.Created,
+					})
+				}
+			}
+		}
+	}
 
 	var royalZombies, otherZombies []MemberReport
 	var active []ActiveMember
 	for _, m := range tracked {
-		if msgs, ok := userMessages[m.id]; ok {
-			active = append(active, ActiveMember{m.name, msgs})
+		msgs := userMessages[m.id]
+		ghPRs := ghPRsByName[m.name]
+		if len(msgs) > 0 || len(ghPRs) > 0 {
+			active = append(active, ActiveMember{m.name, msgs, ghPRs})
 		} else if cfg.IsRoyal(m.id, m.name) {
 			royalZombies = append(royalZombies, MemberReport{m.name})
 		} else {
@@ -99,7 +131,7 @@ func DetectZombies(client *SlackClient, cfg *Config, mode string, daysOverride i
 	sort.Slice(active, func(i, j int) bool { return sortByName(active[i].DisplayName, active[j].DisplayName) })
 
 	return &Report{
-		Mode: mode, Workspace: cfg.Workspace,
+		Mode: mode, Source: source, Workspace: cfg.Workspace,
 		From: from, To: to, ByDay: byDay,
 		RoyalZombies: royalZombies, OtherZombies: otherZombies,
 		Active: active, TotalCount: len(tracked), ChannelCount: channelCount,
@@ -197,7 +229,11 @@ func FormatReport(r *Report) []string {
 		}
 	}
 
-	blocks = append(blocks, fmt.Sprintf("\nActive: %d/%d | Channels: %d\n", len(r.Active), r.TotalCount, r.ChannelCount))
+	footer := fmt.Sprintf("\nActive: %d/%d | Source: %s", len(r.Active), r.TotalCount, r.Source)
+	if r.ChannelCount > 0 {
+		footer += fmt.Sprintf(" | Channels: %d", r.ChannelCount)
+	}
+	blocks = append(blocks, footer+"\n")
 
 	// Pack blocks into messages without exceeding Slack limit
 	var messages []string
@@ -217,36 +253,58 @@ func FormatReport(r *Report) []string {
 
 func formatActiveMember(a ActiveMember, byDay bool, workspace string) string {
 	var b strings.Builder
-	if byDay {
-		dayParts := formatDayLinks(a.Messages, workspace)
-		fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(dayParts, " "))
-	} else {
-		type prEntry struct {
-			link  MessageLink
-			count int
+	var parts []string
+
+	// Slack activity
+	if len(a.Messages) > 0 {
+		if byDay {
+			parts = append(parts, formatDayLinks(a.Messages, workspace)...)
+		} else {
+			parts = append(parts, formatDeduped(a.Messages, workspace)...)
 		}
-		seen := make(map[string]*prEntry)
-		var order []string
-		for _, msg := range a.Messages {
-			if e, ok := seen[msg.PRURL]; ok {
-				e.count++
-			} else {
-				seen[msg.PRURL] = &prEntry{link: msg, count: 1}
-				order = append(order, msg.PRURL)
-			}
-		}
-		links := make([]string, len(order))
-		for i, pr := range order {
-			e := seen[pr]
-			if e.count > 1 {
-				links[i] = fmt.Sprintf("<%s|%d>(%d)", e.link.URL(workspace), i+1, e.count)
-			} else {
-				links[i] = fmt.Sprintf("<%s|%d>", e.link.URL(workspace), i+1)
-			}
-		}
-		fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(links, " "))
 	}
+
+	// GitHub PRs
+	if len(a.GitHubPRs) > 0 {
+		var ghLinks []string
+		for i, pr := range a.GitHubPRs {
+			ghLinks = append(ghLinks, fmt.Sprintf("<%s|GH%d>", pr.URL, i+1))
+		}
+		if len(parts) > 0 {
+			parts = append(parts, "·")
+		}
+		parts = append(parts, fmt.Sprintf(":github: %s", strings.Join(ghLinks, " ")))
+	}
+
+	fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(parts, " "))
 	return b.String()
+}
+
+func formatDeduped(msgs []MessageLink, workspace string) []string {
+	type prEntry struct {
+		link  MessageLink
+		count int
+	}
+	seen := make(map[string]*prEntry)
+	var order []string
+	for _, msg := range msgs {
+		if e, ok := seen[msg.PRURL]; ok {
+			e.count++
+		} else {
+			seen[msg.PRURL] = &prEntry{link: msg, count: 1}
+			order = append(order, msg.PRURL)
+		}
+	}
+	links := make([]string, len(order))
+	for i, pr := range order {
+		e := seen[pr]
+		if e.count > 1 {
+			links[i] = fmt.Sprintf("<%s|%d>(%d)", e.link.URL(workspace), i+1, e.count)
+		} else {
+			links[i] = fmt.Sprintf("<%s|%d>", e.link.URL(workspace), i+1)
+		}
+	}
+	return links
 }
 
 func formatGroup(header string, members []MemberReport) string {

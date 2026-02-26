@@ -14,13 +14,16 @@ type Channel struct {
 }
 
 type Config struct {
-	SlackToken      string    `yaml:"slack_token"`
-	UserToken       string    `yaml:"user_token"`
-	Workspace       string    `yaml:"workspace"`
-	Channels        []Channel `yaml:"channels"`
-	ReportRecipient string    `yaml:"report_recipient"`
-	Whitelist       []string  `yaml:"whitelist"`
-	RoyalMembers    []string  `yaml:"royal_members"`
+	SlackToken      string            `yaml:"slack_token"`
+	UserToken       string            `yaml:"user_token"`
+	Workspace       string            `yaml:"workspace"`
+	GitHubToken     string            `yaml:"github_token"`
+	GitHubOrg       string            `yaml:"github_org"`
+	GitHubUsers     map[string]string `yaml:"github_users"`
+	Channels        []Channel         `yaml:"channels"`
+	ReportRecipient string            `yaml:"report_recipient"`
+	Whitelist       []string          `yaml:"whitelist"`
+	RoyalMembers    []string          `yaml:"royal_members"`
 }
 
 func LoadConfig(path string) (*Config, error) {
