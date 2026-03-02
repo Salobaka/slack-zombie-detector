@@ -235,10 +235,16 @@ func FormatReport(r *Report) []string {
 	}
 	blocks = append(blocks, footer+"\n")
 
+	// Split oversized blocks at safe boundaries (never inside <...> hyperlinks)
+	var safeBlocks []string
+	for _, block := range blocks {
+		safeBlocks = append(safeBlocks, splitSafe(block, slackMaxLen)...)
+	}
+
 	// Pack blocks into messages without exceeding Slack limit
 	var messages []string
 	var current strings.Builder
-	for _, block := range blocks {
+	for _, block := range safeBlocks {
 		if current.Len()+len(block) > slackMaxLen && current.Len() > 0 {
 			messages = append(messages, current.String())
 			current.Reset()
@@ -249,6 +255,39 @@ func FormatReport(r *Report) []string {
 		messages = append(messages, current.String())
 	}
 	return messages
+}
+
+// splitSafe splits text into chunks ≤ maxLen, never breaking inside <...> hyperlinks.
+func splitSafe(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+	var parts []string
+	for len(text) > maxLen {
+		cutAt := -1
+		inLink := false
+		for i := 0; i < maxLen && i < len(text); i++ {
+			switch text[i] {
+			case '<':
+				inLink = true
+			case '>':
+				inLink = false
+			case ' ':
+				if !inLink {
+					cutAt = i
+				}
+			}
+		}
+		if cutAt <= 0 {
+			cutAt = maxLen
+		}
+		parts = append(parts, strings.TrimRight(text[:cutAt], " ")+"\n")
+		text = strings.TrimLeft(text[cutAt:], " ")
+	}
+	if len(text) > 0 {
+		parts = append(parts, text)
+	}
+	return parts
 }
 
 func formatActiveMember(a ActiveMember, byDay bool, workspace string) string {
@@ -273,7 +312,7 @@ func formatActiveMember(a ActiveMember, byDay bool, workspace string) string {
 		if len(parts) > 0 {
 			parts = append(parts, "·")
 		}
-		parts = append(parts, fmt.Sprintf(":github: %s", strings.Join(ghLinks, " ")))
+		parts = append(parts, fmt.Sprintf("(%d) %s", len(a.GitHubPRs), strings.Join(ghLinks, " ")))
 	}
 
 	fmt.Fprintf(&b, "@%s — %s\n", a.DisplayName, strings.Join(parts, " "))

@@ -60,7 +60,7 @@ func (gc *GitHubClient) FetchPRs(from, to time.Time) ([]GitHubPR, error) {
 		}
 
 		err = json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
