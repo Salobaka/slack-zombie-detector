@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,23 +85,37 @@ func DetectZombies(client *SlackClient, cfg *Config, mode, source string, daysOv
 		tracked = append(tracked, member{uid, name})
 	}
 
-	// Slack scan
+	// Run Slack and GitHub scans concurrently
 	userMessages := make(map[string][]MessageLink)
 	channelCount := 0
+	ghPRsByName := make(map[string][]PRLink)
+
+	var wg sync.WaitGroup
+	var slackErr, ghErr error
+
 	if useSlack {
-		scanClient, targets, err := scanTargets(client, cfg, mode)
-		if err != nil {
-			return nil, err
-		}
-		userMessages, channelCount = scanForPRs(scanClient, targets, from, to)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scanClient, targets, err := scanTargets(client, cfg, mode)
+			if err != nil {
+				slackErr = err
+				return
+			}
+			userMessages, channelCount = scanForPRs(scanClient, targets, from, to)
+		}()
 	}
 
-	// GitHub scan
-	ghPRsByName := make(map[string][]PRLink)
 	if useGitHub && cfg.GitHubToken != "" && cfg.GitHubOrg != "" {
-		ghClient := NewGitHubClient(cfg.GitHubToken, cfg.GitHubOrg)
-		prs, err := ghClient.FetchPRs(from, to)
-		if err == nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ghClient := NewGitHubClient(cfg.GitHubToken, cfg.GitHubOrg)
+			prs, err := ghClient.FetchPRs(from, to)
+			if err != nil {
+				ghErr = err
+				return
+			}
 			for _, pr := range prs {
 				if displayName, ok := cfg.GitHubUsers[pr.Author]; ok {
 					ghPRsByName[displayName] = append(ghPRsByName[displayName], PRLink{
@@ -108,7 +123,15 @@ func DetectZombies(client *SlackClient, cfg *Config, mode, source string, daysOv
 					})
 				}
 			}
-		}
+		}()
+	}
+
+	wg.Wait()
+	if slackErr != nil {
+		return nil, slackErr
+	}
+	if ghErr != nil {
+		return nil, ghErr
 	}
 
 	var royalZombies, otherZombies []MemberReport
@@ -179,18 +202,60 @@ func scanTargets(client *SlackClient, cfg *Config, mode string) (*SlackClient, [
 }
 
 func scanForPRs(client *SlackClient, targets []scanTarget, from, to time.Time) (map[string][]MessageLink, int) {
+	type userMsg struct {
+		userID string
+		link   MessageLink
+	}
+	type result struct {
+		msgs []userMsg
+		ok   bool
+	}
+
+	const workers = 10
+	jobs := make(chan scanTarget, len(targets))
+	results := make(chan result, len(targets))
+
+	var wg sync.WaitGroup
+	for range min(workers, len(targets)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ch := range jobs {
+				messages, err := client.FetchMessages(ch.id, from, to)
+				if err != nil {
+					results <- result{ok: false}
+					continue
+				}
+				var found []userMsg
+				for _, msg := range messages {
+					if pr := githubPR.FindString(msg.Text); pr != "" {
+						found = append(found, userMsg{msg.User, MessageLink{ch.id, msg.Timestamp, pr}})
+					}
+				}
+				results <- result{msgs: found, ok: true}
+			}
+		}()
+	}
+
+	for _, ch := range targets {
+		jobs <- ch
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	userMsgs := make(map[string][]MessageLink)
 	scanned := 0
-	for _, ch := range targets {
-		messages, err := client.FetchMessages(ch.id, from, to)
-		if err != nil {
+	for r := range results {
+		if !r.ok {
 			continue
 		}
 		scanned++
-		for _, msg := range messages {
-			if pr := githubPR.FindString(msg.Text); pr != "" {
-				userMsgs[msg.User] = append(userMsgs[msg.User], MessageLink{ch.id, msg.Timestamp, pr})
-			}
+		for _, um := range r.msgs {
+			userMsgs[um.userID] = append(userMsgs[um.userID], um.link)
 		}
 	}
 	return userMsgs, scanned

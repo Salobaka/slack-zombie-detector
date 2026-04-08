@@ -47,6 +47,11 @@ func (gc *GitHubClient) FetchPRs(from, to time.Time) ([]GitHubPR, error) {
 			return nil, fmt.Errorf("github api: %w", err)
 		}
 
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("github api: status %d", resp.StatusCode)
+		}
+
 		var result struct {
 			Items []struct {
 				User struct {
